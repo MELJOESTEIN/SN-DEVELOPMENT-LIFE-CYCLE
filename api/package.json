@@ -1,0 +1,27 @@
+{
+  "name": "api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node ./bin/www",
+    "dev": "env-cmd -f ./.env node ./bin/www",
+    "drop": "env-cmd -f ./.env node ./database/drop_db.js",
+    "create": "env-cmd -f ./.env node ./database/create_db.js",
+    "test": "jasmine"
+  },
+  "dependencies": {
+    "axios": "^1.2.2",
+    "bcrypt": "^5.1.0",
+    "cookie-parser": "~1.4.4",
+    "cors": "^2.8.5",
+    "debug": "~2.6.9",
+    "env-cmd": "^10.1.0",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "mongoose": "^6.8.3",
+    "morgan": "~1.9.1"
+  },
+  "devDependencies": {
+    "jasmine": "^4.5.0"
+  }
+}

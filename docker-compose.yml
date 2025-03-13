@@ -1,0 +1,34 @@
+version: '3'
+
+# Containers we're going to run.
+services:
+   # Our Phoenix container.
+   api:
+      build: ./api
+      image: myapp:1.0
+      environment: 
+         - MONGODB_CONNSTRING=mongodb://AzureDiamond:hunter2@mongodb
+      ports:
+         - 4000:4000
+      depends_on:
+         - mongodb
+
+   mongodb:
+      image: mongo:5.0
+      environment:
+         - MONGO_INITDB_ROOT_USERNAME=AzureDiamond
+         - MONGO_INITDB_ROOT_PASSWORD=hunter2
+
+   front:
+      build: ./front-office/money-count
+      image: front
+      restart: always
+      depends_on:
+          - api
+      ports:
+          - "3001:3001"
+      expose:
+          - 3001
+      #volumes:
+      #   - ./front-end/:/code/
+      #   - /code/node_modules
