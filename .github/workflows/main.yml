@@ -1,1 +1,156 @@
+name: CI/CD Pipeline
 
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    
+    services:
+      mongodb:
+        image: mongo:5.0
+        env:
+          MONGO_INITDB_ROOT_USERNAME: AzureDiamond
+          MONGO_INITDB_ROOT_PASSWORD: hunter2
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd mongosh --eval "db.adminCommand('ping')"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: 'npm'
+          cache-dependency-path: api/package-lock.json
+      
+      - name: Install Dependencies
+        working-directory: ./api
+        run: npm ci
+      
+      - name: Run Backend Tests
+        working-directory: ./api
+        run: npm test
+        env:
+          MONGODB_CONNSTRING: mongodb://AzureDiamond:hunter2@localhost:27017
+      
+      - name: Run Linting
+        working-directory: ./api
+        run: |
+          npm install eslint --no-save
+          npx eslint . --ext .js
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          cache: 'npm'
+          cache-dependency-path: front-office/money-count/package-lock.json
+      
+      - name: Install Dependencies
+        working-directory: ./front-office/money-count
+        run: npm ci
+      
+      - name: Run Frontend Tests
+        working-directory: ./front-office/money-count
+        run: npm run test:unit
+      
+      - name: Run Linting
+        working-directory: ./front-office/money-count
+        run: npm run lint
+
+  build-and-push:
+    needs: [backend-test, frontend-test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Login to Docker Hub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      
+      - name: Build and push backend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./api
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/myapp:latest,${{ secrets.DOCKER_HUB_USERNAME }}/myapp:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/myapp:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/myapp:buildcache,mode=max
+      
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./front-office/money-count
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/front:latest,${{ secrets.DOCKER_HUB_USERNAME }}/front:${{ github.sha }}
+          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/front:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/front:buildcache,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          known_hosts: ${{ secrets.KNOWN_HOSTS }}
+      
+      - name: Deploy to production server
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "
+            cd /path/to/deployment &&
+            docker-compose pull &&
+            docker-compose up -d
+          "
+
+  security-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run Dependency Vulnerability Scan
+        uses: snyk/actions/node@master
+        with:
+          args: --all-projects
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      
+      - name: Run Docker Image Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'docker-compose'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          vuln-type: 'os,library'
+          severity: 'CRITICAL,HIGH'
