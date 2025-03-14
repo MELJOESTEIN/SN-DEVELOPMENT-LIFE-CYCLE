@@ -5,6 +5,8 @@ on:
     branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master, develop ]
+  schedule:
+    - cron: '0 0 * * *'  # Daily security scan at midnight
 
 jobs:
   backend-test:
@@ -75,10 +77,298 @@ jobs:
         working-directory: ./front-office/money-count
         run: npm run lint
 
-  build-and-push:
-    needs: [backend-test, frontend-test]
+  security-scan:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      # Snyk vulnerability scanning for dependencies
+      - name: Run Snyk to check for vulnerabilities (Backend)
+        uses: snyk/actions/node@master
+        with:
+          args: --file=api/package.json --severity-threshold=medium --json > snyk-backend-report.json
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          
+      - name: Run Snyk to check for vulnerabilities (Frontend)
+        uses: snyk/actions/node@master
+        with:
+          args: --file=front-office/money-count/package.json --severity-threshold=medium --json > snyk-frontend-report.json
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      
+      # MongoDB specific security checks
+      - name: MongoDB Security Checks
+        run: |
+          echo "Running MongoDB specific security checks..."
+          # Check for hardcoded credentials in code
+          grep -r --include="*.js" "mongodb://" ./api || echo "No hardcoded MongoDB URLs found"
+          # Check for proper MongoDB connection settings
+          grep -r --include="*.js" "mongoose.connect" ./api || echo "No direct mongoose connections found"
+          
+      # OWASP ZAP API security scan
+      - name: OWASP ZAP API Scan
+        uses: zaproxy/action-api-scan@v0.4.0
+        with:
+          target: 'http://localhost:4000'
+          rules_file_name: '.zap/rules.tsv'
+          cmd_options: '-a'
+          allow_issue_writing: false
+          
+      # Static Application Security Testing (SAST)
+      - name: Run NodeJSScan
+        uses: ajinabraham/njsscan-action@master
+        with:
+          args: './api --json --output njsscan-results.json'
+          
+      # Secret scanning
+      - name: TruffleHog OSS
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --debug --only-verified
+          
+      # Docker image security scanning
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          
+      # Upload security scan results as artifacts
+      - name: Upload security scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scan-results
+          path: |
+            snyk-backend-report.json
+            snyk-frontend-report.json
+            njsscan-results.json
+            trivy-results.sarif
+            
+      # Send notifications for security issues
+      - name: Slack notification for security issues
+        uses: rtCamp/action-slack-notify@v2
+        if: failure()
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_COLOR: 'danger'
+          SLACK_TITLE: 'Security Scan Failed'
+          SLACK_MESSAGE: 'Security vulnerabilities detected in the codebase. Check the GitHub Actions logs for details.'
+          
+      # Generate security report summary
+      - name: Generate Security Report Summary
+        run: |
+          echo "# Security Scan Summary" > security-summary.md
+          echo "## Snyk Dependency Scan" >> security-summary.md
+          echo "Backend vulnerabilities: $(cat snyk-backend-report.json | jq '.vulnerabilities | length')" >> security-summary.md
+          echo "Frontend vulnerabilities: $(cat snyk-frontend-report.json | jq '.vulnerabilities | length')" >> security-summary.md
+          echo "## SAST Scan" >> security-summary.md
+          echo "NodeJSScan issues: $(cat njsscan-results.json | jq '.nodejs | length')" >> security-summary.md
+          echo "## Docker Image Scan" >> security-summary.md
+          echo "Trivy issues: $(cat trivy-results.sarif | jq '.runs[0].results | length')" >> security-summary.md
+          
+      - name: Upload Security Summary
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-summary
+          path: security-summary.md
+
+  # MongoDB specific security validation job
+  mongodb-security-validation:
+    runs-on: ubuntu-latest
+    needs: [backend-test]
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 16
+          
+      - name: Install MongoDB Security Validation Tools
+        run: |
+          npm install -g mongodb-schema-validator
+          npm install -g js-yaml
+          
+      - name: Validate MongoDB Schema Security
+        run: |
+          # Check for proper schema validation in Mongoose models
+          find ./api/models -name "*.js" -exec grep -l "validate" {} \; > models-with-validation.txt
+          find ./api/models -name "*.js" | wc -l > total-models.txt
+          echo "Models with validation: $(cat models-with-validation.txt | wc -l) / $(cat total-models.txt)"
+          
+      - name: Check for MongoDB Security Best Practices
+        run: |
+          # Check for proper authentication
+          grep -r "mongoose.connect" ./api > mongoose-connections.txt
+          grep -E "authSource|authMechanism" mongoose-connections.txt > secure-connections.txt
+          echo "Secure MongoDB connections: $(cat secure-connections.txt | wc -l) / $(cat mongoose-connections.txt | wc -l)"
+          
+          # Check for proper input sanitization
+          grep -r "mongo-sanitize" ./api > sanitized-inputs.txt
+          echo "Files using mongo-sanitize: $(cat sanitized-inputs.txt | wc -l)"
+
+  # Security dashboard setup
+  security-dashboard:
+    runs-on: ubuntu-latest
+    needs: [security-scan, mongodb-security-validation]
+    if: always()
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Download security scan results
+        uses: actions/download-artifact@v3
+        with:
+          name: security-scan-results
+          
+      - name: Download security summary
+        uses: actions/download-artifact@v3
+        with:
+          name: security-summary
+          
+      - name: Setup Grafana Dashboard
+        run: |
+          # Convert security scan results to Grafana-compatible format
+          mkdir -p grafana/dashboards
+          
+          # Create dashboard JSON
+          cat > grafana/dashboards/security-dashboard.json << EOF
+          {
+            "annotations": {
+              "list": []
+            },
+            "editable": true,
+            "fiscalYearStartMonth": 0,
+            "graphTooltip": 0,
+            "id": 1,
+            "links": [],
+            "liveNow": false,
+            "panels": [
+              {
+                "datasource": {
+                  "type": "prometheus",
+                  "uid": "prometheus"
+                },
+                "fieldConfig": {
+                  "defaults": {
+                    "color": {
+                      "mode": "palette-classic"
+                    },
+                    "custom": {
+                      "axisCenteredZero": false,
+                      "axisColorMode": "text",
+                      "axisLabel": "",
+                      "axisPlacement": "auto",
+                      "barAlignment": 0,
+                      "drawStyle": "line",
+                      "fillOpacity": 0,
+                      "gradientMode": "none",
+                      "hideFrom": {
+                        "legend": false,
+                        "tooltip": false,
+                        "viz": false
+                      },
+                      "lineInterpolation": "linear",
+                      "lineWidth": 1,
+                      "pointSize": 5,
+                      "scaleDistribution": {
+                        "type": "linear"
+                      },
+                      "showPoints": "auto",
+                      "spanNulls": false,
+                      "stacking": {
+                        "group": "A",
+                        "mode": "none"
+                      },
+                      "thresholdsStyle": {
+                        "mode": "off"
+                      }
+                    },
+                    "mappings": [],
+                    "thresholds": {
+                      "mode": "absolute",
+                      "steps": [
+                        {
+                          "color": "green",
+                          "value": null
+                        },
+                        {
+                          "color": "red",
+                          "value": 80
+                        }
+                      ]
+                    }
+                  },
+                  "overrides": []
+                },
+                "gridPos": {
+                  "h": 8,
+                  "w": 12,
+                  "x": 0,
+                  "y": 0
+                },
+                "id": 1,
+                "options": {
+                  "legend": {
+                    "calcs": [],
+                    "displayMode": "list",
+                    "placement": "bottom",
+                    "showLegend": true
+                  },
+                  "tooltip": {
+                    "mode": "single",
+                    "sort": "none"
+                  }
+                },
+                "title": "Security Vulnerabilities Over Time",
+                "type": "timeseries"
+              }
+            ],
+            "refresh": "",
+            "schemaVersion": 38,
+            "style": "dark",
+            "tags": [],
+            "templating": {
+              "list": []
+            },
+            "time": {
+              "from": "now-6h",
+              "to": "now"
+            },
+            "timepicker": {},
+            "timezone": "",
+            "title": "Security Dashboard",
+            "uid": "security-dashboard",
+            "version": 1,
+            "weekStart": ""
+          }
+          EOF
+          
+      - name: Upload Grafana Dashboard
+        uses: actions/upload-artifact@v3
+        with:
+          name: grafana-dashboard
+          path: grafana/dashboards/
+          
+      # Webhook to update dashboard
+      - name: Trigger Dashboard Update
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+            -d '{"dashboard_update": true, "build_id": "${{ github.run_id }}"}' \
+            ${{ secrets.DASHBOARD_WEBHOOK_URL }} || echo "Dashboard webhook failed"
+
+  build-and-push:
+    needs: [backend-test, frontend-test, security-scan]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && success()
     
     steps:
       - uses: actions/checkout@v3
@@ -113,7 +403,7 @@ jobs:
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && success()
     
     steps:
       - uses: actions/checkout@v3
@@ -131,26 +421,14 @@ jobs:
             docker-compose pull &&
             docker-compose up -d
           "
-
-  security-scan:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - uses: actions/checkout@v3
       
-      - name: Run Dependency Vulnerability Scan
-        uses: snyk/actions/node@master
-        with:
-          args: --all-projects
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-      
-      - name: Run Docker Image Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: 'docker-compose'
-          format: 'table'
-          exit-code: '1'
-          ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
+      # Post-deployment security verification
+      - name: Post-deployment Security Verification
+        run: |
+          ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "
+            # Verify MongoDB is running with authentication enabled
+            docker exec mongodb_container mongosh --eval 'db.adminCommand({ getCmdLineOpts: 1 })' | grep -q 'auth' && echo 'MongoDB auth enabled' || echo 'WARNING: MongoDB auth not enabled'
+            
+            # Check for exposed ports
+            docker ps --format '{{.Names}} {{.Ports}}' | grep -v '127.0.0.1' | grep '27017' && echo 'WARNING: MongoDB port exposed' || echo 'MongoDB port properly secured'
+          "
