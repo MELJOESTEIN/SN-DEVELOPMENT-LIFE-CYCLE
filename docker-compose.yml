@@ -1,5 +1,3 @@
-version: '3'
-
 # Containers we're going to run.
 services:
    # Our Phoenix container.

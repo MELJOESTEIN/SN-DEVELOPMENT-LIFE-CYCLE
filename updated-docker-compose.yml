@@ -1,0 +1,89 @@
+# Updated docker-compose.yml
+services:
+  api:
+    build: ./api
+    image: myapp:1.0
+    user: app
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - ./api/.env
+    secrets:
+      - mongodb_uri
+    ports:
+      - "127.0.0.1:4000:4000"  # Only expose locally
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+  mongodb:
+    image: mongo:6.0
+    user: mongodb
+    restart: unless-stopped
+    env_file:
+      - ./mongodb/.env
+    volumes:
+      - mongodb_data:/data/db
+      - ./mongodb/mongod.conf:/etc/mongod.conf
+    command: ["mongod", "--config", "/etc/mongod.conf"]
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    ports:
+      - "127.0.0.1:27017:27017"  # Only expose locally
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+  front:
+    build: ./front-office/money-count
+    image: front:1.0
+    restart: unless-stopped
+    user: frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  mongodb_data:
+    driver: local
+
+secrets:
+  mongodb_uri:
+    file: ./secrets/mongodb_uri.txt

@@ -2,9 +2,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main, develop ]
   schedule:
     - cron: '0 0 * * *'  # Daily security scan at midnight
 
@@ -418,8 +418,8 @@ jobs:
         run: |
           ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} "
             cd /path/to/deployment &&
-            docker-compose pull &&
-            docker-compose up -d
+            docker compose pull &&
+            docker compose up -d
           "
       
       # Post-deployment security verification
